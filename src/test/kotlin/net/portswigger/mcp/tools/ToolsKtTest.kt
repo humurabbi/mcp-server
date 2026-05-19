@@ -192,6 +192,7 @@ class ToolsKtTest {
             }
 
             verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>()) }
+            verify(exactly = 1) { api.siteMap().add(httpResponse) }
             assertEquals("GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n", capturedRequest.captured.toString(), "Request body should match")
         }
 
@@ -222,6 +223,8 @@ class ToolsKtTest {
                 delay(100)
                 result.expectTextContent("<no response>")
             }
+
+            verify(exactly = 0) { api.siteMap().add(any<burp.api.montoya.http.message.HttpRequestResponse>()) }
         }
 
         @Test
@@ -265,7 +268,8 @@ class ToolsKtTest {
             }
 
             verify(exactly = 1) { HttpRequest.http2Request(any(), any(), any<String>()) }
-            
+            verify(exactly = 1) { api.siteMap().add(httpResponse) }
+
             assertEquals("Test body", bodySlot.captured, "Request body should match")
             
             val pseudoHeaderList = headersSlot.captured.filter { it.name().startsWith(":") }
@@ -307,8 +311,10 @@ class ToolsKtTest {
                 delay(100)
                 result.expectTextContent("<no response>")
             }
+
+            verify(exactly = 0) { api.siteMap().add(any<burp.api.montoya.http.message.HttpRequestResponse>()) }
         }
-        
+
         @Test
         fun `http2 pseudo headers should be ordered correctly`() {
             val httpService = mockk<Http>()
@@ -350,12 +356,85 @@ class ToolsKtTest {
             
             val expectedOrder = listOf(":scheme", ":method", ":path", ":authority")
             for (i in 0 until minOf(expectedOrder.size, pseudoHeaderNames.size)) {
-                assertEquals(expectedOrder[i], pseudoHeaderNames[i], 
+                assertEquals(expectedOrder[i], pseudoHeaderNames[i],
                     "Pseudo headers should follow the order: scheme, method, path, authority")
             }
         }
+
+        @Test
+        fun `create repeater tab http1 should normalize line endings`() {
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val contentSlot = slot<String>()
+
+            every { HttpRequest.httpRequest(any(), capture(contentSlot)) } answers {
+                val captured = secondArg<String>()
+                mockk<HttpRequest>().also {
+                    every { it.toString() } returns captured
+                }
+            }
+            every { api.repeater() } returns repeater
+
+            runBlocking {
+                val result = client.callTool(
+                    "create_repeater_tab", mapOf(
+                        "tabName" to "lf-only",
+                        "content" to "GET /foo HTTP/1.1\nHost: example.com\n\n",
+                        "targetHostname" to "example.com",
+                        "targetPort" to 80,
+                        "usesHttps" to false
+                    )
+                )
+
+                delay(100)
+                assertNotNull(result)
+            }
+
+            verify(exactly = 1) { repeater.sendToRepeater(any<HttpRequest>(), "lf-only") }
+            assertEquals("GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n", contentSlot.captured, "LF should be normalized to CRLF before sending to Repeater")
+        }
+
+        @Test
+        fun `create repeater tab http2 should build http2 request`() {
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val httpRequest = mockk<HttpRequest>()
+            val headersSlot = slot<List<HttpHeader>>()
+            val bodySlot = slot<String>()
+
+            every { HttpRequest.http2Request(any(), capture(headersSlot), capture(bodySlot)) } returns httpRequest
+            every { api.repeater() } returns repeater
+
+            val pseudoHeaders = mapOf(
+                "method" to "POST", "path" to "/api/x", "authority" to "example.com", "scheme" to "https"
+            )
+            val headers = mapOf("Content-Type" to "application/json")
+            val requestBody = "{\"k\":\"v\"}"
+
+            runBlocking {
+                val result = client.callTool(
+                    "create_repeater_tab_http2", mapOf(
+                        "tabName" to "h2-tab",
+                        "pseudoHeaders" to Json.encodeToJsonElement(pseudoHeaders),
+                        "headers" to Json.encodeToJsonElement(headers),
+                        "requestBody" to requestBody,
+                        "targetHostname" to "example.com",
+                        "targetPort" to 443,
+                        "usesHttps" to true
+                    )
+                )
+
+                delay(100)
+                assertNotNull(result)
+            }
+
+            verify(exactly = 1) { repeater.sendToRepeater(httpRequest, "h2-tab") }
+            assertEquals("{\"k\":\"v\"}", bodySlot.captured, "Request body should be passed through unchanged")
+
+            val pseudoHeaderNames = headersSlot.captured.filter { it.name().startsWith(":") }.map { it.name() }
+            assertEquals(listOf(":scheme", ":method", ":path", ":authority"), pseudoHeaderNames)
+            assertTrue(headersSlot.captured.any { it.name() == "content-type" && it.value() == "application/json" })
+        }
     }
-    
+
     @Nested
     inner class UtilityToolsTests {
         @Test
