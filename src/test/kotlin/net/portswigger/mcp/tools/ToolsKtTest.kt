@@ -841,13 +841,10 @@ class ToolsKtTest {
     @Nested
     inner class CollaboratorToolsTests {
         private val collaborator = mockk<Collaborator>()
-        private val collaboratorClient = mockk<CollaboratorClient>()
-        private val collaboratorServer = mockk<CollaboratorServer>()
+        private val defaultPayloadGenerator = mockk<CollaboratorPayloadGenerator>()
 
         @BeforeEach
         fun setupCollaborator() {
-            mockkStatic(InteractionFilter::class)
-
             val burpSuite = mockk<burp.api.montoya.burpsuite.BurpSuite>()
             val version = mockk<burp.api.montoya.core.Version>()
             every { api.burpSuite() } returns burpSuite
@@ -860,9 +857,7 @@ class ToolsKtTest {
             every { burpSuite.importUserOptionsFromJson(any()) } just runs
 
             every { api.collaborator() } returns collaborator
-            every { collaborator.createClient() } returns collaboratorClient
-            every { collaboratorClient.server() } returns collaboratorServer
-            every { collaboratorServer.address() } returns "burpcollaborator.net"
+            every { collaborator.defaultPayloadGenerator() } returns defaultPayloadGenerator
 
             serverManager.stop {}
             serverStarted = false
@@ -881,184 +876,46 @@ class ToolsKtTest {
             }
         }
 
-        @AfterEach
-        fun cleanupCollaborator() {
-            unmockkStatic(InteractionFilter::class)
-        }
-
-        private fun mockInteraction(
-            id: String,
-            type: InteractionType,
-            clientIp: String = "10.0.0.1",
-            clientPort: Int = 54321,
-            customData: String? = null,
-            dnsDetails: DnsDetails? = null,
-            httpDetails: HttpDetails? = null,
-            smtpDetails: SmtpDetails? = null
-        ): Interaction {
-            val interactionId = mockk<InteractionId>()
-            every { interactionId.toString() } returns id
-
-            return mockk<Interaction>().also {
-                every { it.id() } returns interactionId
-                every { it.type() } returns type
-                every { it.timeStamp() } returns ZonedDateTime.parse("2025-01-01T12:00:00Z")
-                every { it.clientIp() } returns InetAddress.getByName(clientIp)
-                every { it.clientPort() } returns clientPort
-                every { it.customData() } returns Optional.ofNullable(customData)
-                every { it.dnsDetails() } returns Optional.ofNullable(dnsDetails)
-                every { it.httpDetails() } returns Optional.ofNullable(httpDetails)
-                every { it.smtpDetails() } returns Optional.ofNullable(smtpDetails)
-            }
-        }
-
         @Test
-        fun `generate payload should return payload and server info`() {
+        fun `generate payload uses default generator and includes server info`() {
             val payload = mockk<CollaboratorPayload>()
             val payloadId = mockk<InteractionId>()
+            val server = mockk<CollaboratorServer>()
+            every { server.address() } returns "burpcollaborator.net"
             every { payload.toString() } returns "abc123.burpcollaborator.net"
             every { payload.id() } returns payloadId
+            every { payload.server() } returns Optional.of(server)
             every { payloadId.toString() } returns "abc123"
-            every { collaboratorClient.generatePayload() } returns payload
+            every { defaultPayloadGenerator.generatePayload() } returns payload
 
             runBlocking {
                 val result = client.callTool("generate_collaborator_payload", emptyMap())
                 delay(100)
-                result.expectTextContent(
-                    "Payload: abc123.burpcollaborator.net\n" +
-                    "Payload ID: abc123\n" +
-                    "Collaborator server: burpcollaborator.net"
-                )
+                val text = result.expectTextContent()
+                assertTrue(text.contains("Payload: abc123.burpcollaborator.net"))
+                assertTrue(text.contains("Payload ID: abc123"))
+                assertTrue(text.contains("Collaborator server: burpcollaborator.net"))
+                assertTrue(text.contains("Burp's Collaborator tab"), "Response should point user to the UI Collaborator tab")
             }
 
-            verify(exactly = 1) { collaboratorClient.generatePayload() }
+            verify(exactly = 1) { defaultPayloadGenerator.generatePayload() }
         }
 
         @Test
-        fun `generate payload with custom data should pass custom data`() {
+        fun `generate payload handles missing server location`() {
             val payload = mockk<CollaboratorPayload>()
             val payloadId = mockk<InteractionId>()
-            every { payload.toString() } returns "custom123.burpcollaborator.net"
+            every { payload.toString() } returns "noserver.burpcollaborator.net"
             every { payload.id() } returns payloadId
-            every { payloadId.toString() } returns "custom123"
-            every { collaboratorClient.generatePayload(any<String>()) } returns payload
+            every { payload.server() } returns Optional.empty()
+            every { payloadId.toString() } returns "noserver"
+            every { defaultPayloadGenerator.generatePayload() } returns payload
 
             runBlocking {
-                val result = client.callTool(
-                    "generate_collaborator_payload", mapOf(
-                        "customData" to "mydata"
-                    )
-                )
-                delay(100)
-                result.expectTextContent(
-                    "Payload: custom123.burpcollaborator.net\n" +
-                    "Payload ID: custom123\n" +
-                    "Collaborator server: burpcollaborator.net"
-                )
-            }
-
-            verify(exactly = 1) { collaboratorClient.generatePayload("mydata") }
-        }
-
-        @Test
-        fun `get interactions should return dns interaction details`() {
-            val dnsDetails = mockk<DnsDetails>().also {
-                every { it.queryType() } returns DnsQueryType.A
-            }
-            val interaction = mockInteraction("int-001", InteractionType.DNS, dnsDetails = dnsDetails)
-            every { collaboratorClient.getAllInteractions() } returns listOf(interaction)
-
-            runBlocking {
-                val result = client.callTool("get_collaborator_interactions", emptyMap())
+                val result = client.callTool("generate_collaborator_payload", emptyMap())
                 delay(100)
                 val text = result.expectTextContent()
-                assertTrue(text.contains("\"id\":\"int-001\""))
-                assertTrue(text.contains("\"type\":\"DNS\""))
-                assertTrue(text.contains("\"queryType\":\"A\""))
-                assertTrue(text.contains("\"clientIp\":\"10.0.0.1\""))
-            }
-
-            verify(exactly = 1) { collaboratorClient.getAllInteractions() }
-        }
-
-        @Test
-        fun `get interactions should return http interaction details`() {
-            val mockRequest = mockk<burp.api.montoya.http.message.requests.HttpRequest>()
-            every { mockRequest.toString() } returns "GET / HTTP/1.1"
-            val mockResponse = mockk<burp.api.montoya.http.message.responses.HttpResponse>()
-            every { mockResponse.toString() } returns "HTTP/1.1 200 OK"
-            val mockRequestResponse = mockk<burp.api.montoya.http.message.HttpRequestResponse>()
-            every { mockRequestResponse.request() } returns mockRequest
-            every { mockRequestResponse.response() } returns mockResponse
-
-            val httpDetails = mockk<HttpDetails>().also {
-                every { it.protocol() } returns HttpProtocol.HTTP
-                every { it.requestResponse() } returns mockRequestResponse
-            }
-            val interaction = mockInteraction("int-002", InteractionType.HTTP, httpDetails = httpDetails)
-            every { collaboratorClient.getAllInteractions() } returns listOf(interaction)
-
-            runBlocking {
-                val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
-                val text = result.expectTextContent()
-                assertTrue(text.contains("\"type\":\"HTTP\""))
-                assertTrue(text.contains("\"protocol\":\"HTTP\""))
-                assertTrue(text.contains("GET / HTTP/1.1"))
-                assertTrue(text.contains("HTTP/1.1 200 OK"))
-            }
-
-            verify(exactly = 1) { collaboratorClient.getAllInteractions() }
-        }
-
-        @Test
-        fun `get interactions should return smtp interaction details`() {
-            val smtpDetails = mockk<SmtpDetails>().also {
-                every { it.protocol() } returns SmtpProtocol.SMTP
-                every { it.conversation() } returns "EHLO test\r\n250 OK"
-            }
-            val interaction = mockInteraction("int-003", InteractionType.SMTP, smtpDetails = smtpDetails)
-            every { collaboratorClient.getAllInteractions() } returns listOf(interaction)
-
-            runBlocking {
-                val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
-                val text = result.expectTextContent()
-                assertTrue(text.contains("\"type\":\"SMTP\""))
-                assertTrue(text.contains("\"protocol\":\"SMTP\""))
-                assertTrue(text.contains("EHLO test"))
-            }
-
-            verify(exactly = 1) { collaboratorClient.getAllInteractions() }
-        }
-
-        @Test
-        fun `get interactions with payloadId should use filter`() {
-            val mockFilter = mockk<InteractionFilter>()
-            every { InteractionFilter.interactionIdFilter("abc123") } returns mockFilter
-            every { collaboratorClient.getInteractions(mockFilter) } returns emptyList()
-
-            runBlocking {
-                val result = client.callTool(
-                    "get_collaborator_interactions", mapOf(
-                        "payloadId" to "abc123"
-                    )
-                )
-                delay(100)
-                result.expectTextContent("No interactions detected")
-            }
-
-            verify(exactly = 1) { collaboratorClient.getInteractions(mockFilter) }
-        }
-
-        @Test
-        fun `get interactions should return no interactions message when empty`() {
-            every { collaboratorClient.getAllInteractions() } returns emptyList()
-
-            runBlocking {
-                val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
-                result.expectTextContent("No interactions detected")
+                assertTrue(text.contains("Collaborator server: unknown"))
             }
         }
     }
@@ -1083,7 +940,6 @@ class ToolsKtTest {
             val tools = client.listTools()
             assertFalse(tools.any { it.name == "get_scanner_issues" })
             assertFalse(tools.any { it.name == "generate_collaborator_payload" })
-            assertFalse(tools.any { it.name == "get_collaborator_interactions" })
         }
 
         every { version.edition() } returns BurpSuiteEdition.PROFESSIONAL
@@ -1107,7 +963,7 @@ class ToolsKtTest {
             val tools = client.listTools()
             assertTrue(tools.any { it.name == "get_scanner_issues" })
             assertTrue(tools.any { it.name == "generate_collaborator_payload" })
-            assertTrue(tools.any { it.name == "get_collaborator_interactions" })
+            assertFalse(tools.any { it.name == "get_collaborator_interactions" }, "get_collaborator_interactions was removed; default-generator payloads surface in the UI")
         }
     }
 }
