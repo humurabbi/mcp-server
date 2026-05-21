@@ -40,17 +40,6 @@ Three related improvements bundled together:
 
 3. **New `create_repeater_tab_http2` tool**. The existing `create_repeater_tab` only constructs HTTP/1.1 requests, which on HTTP/2 servers renders awkwardly in Repeater (the Inspector view has to be flipped from HTTP/2 back to HTTP/1.1 to read the request cleanly). The new tool takes `pseudoHeaders` + `headers` + `requestBody` (same schema as `send_http2_request`) and dispatches via `HttpRequest.http2Request`. The shared `buildHttp2HeaderList` helper was extracted so `send_http2_request` and `create_repeater_tab_http2` keep identical pseudo-header ordering and lowercase normalization. The `create_repeater_tab` description was updated to point clients at the HTTP/2 variant for modern targets.
 
-## Related upstream PRs
-
-Two PRs were opened against `PortSwigger/mcp-server` early in this work and left open:
-
-- **#90** — Surface MCP HTTP requests in Site Map and normalize Repeater newlines. Force-pushed once to include the `hasResponse()` gate from `f0da333`.
-- **#91** — Add `create_repeater_tab_http2` for HTTP/2 targets.
-
-The Collaborator change (`49334e4`) was not opened as a PR — it removes a tool (`get_collaborator_interactions`) and a parameter (`customData`) that were added in upstream PR #52, which is the kind of breaking change PortSwigger maintainers typically push back on.
-
-Default workflow going forward is **local-only**: new changes commit to local `main`, then `git push fork main` to mirror to `humurabbi/mcp-server`. PR branches stay where they are, no force-push updates unless explicitly requested.
-
 ## Branch layout
 
 - `main` — primary working branch, all local changes integrated
