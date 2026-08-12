@@ -13,32 +13,26 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.schema.encodeHistoryItem
 import net.portswigger.mcp.schema.toSerializableForm
-import net.portswigger.mcp.security.HistoryAccessSecurity
-import net.portswigger.mcp.security.HistoryAccessType
+import net.portswigger.mcp.security.DataAccessSecurity
+import net.portswigger.mcp.security.DataAccessType
 import net.portswigger.mcp.security.HttpRequestSecurity
+import net.portswigger.mcp.security.filterConfigCredentials
 import java.awt.KeyboardFocusManager
 import java.util.regex.Pattern
 import javax.swing.JTextArea
 
-private suspend fun checkHistoryPermissionOrDeny(
-    accessType: HistoryAccessType, config: McpConfig, api: MontoyaApi, logMessage: String
+private suspend fun checkDataAccessOrDeny(
+    accessType: DataAccessType, config: McpConfig, api: MontoyaApi, logMessage: String
 ): Boolean {
-    val allowed = HistoryAccessSecurity.checkHistoryAccessPermission(accessType, config)
+    val allowed = DataAccessSecurity.checkDataAccessPermission(accessType, config)
     if (!allowed) {
         api.logging().logToOutput("MCP $logMessage access denied")
         return false
     }
     api.logging().logToOutput("MCP $logMessage access granted")
     return true
-}
-
-private fun truncateIfNeeded(serialized: String): String {
-    return if (serialized.length > 5000) {
-        serialized.substring(0, 5000) + "... (truncated)"
-    } else {
-        serialized
-    }
 }
 
 private fun buildHttp2HeaderList(
@@ -65,6 +59,54 @@ private fun buildHttp2HeaderList(
     return (fixedPseudoHeaders + headers).map { HttpHeader.httpHeader(it.key.lowercase(), it.value) }
 }
 
+/**
+ * Normalizes HTTP request line endings from MCP clients.
+ *
+ * MCP clients (e.g. Claude Code) often emit `\r\n` as the 4-character literal
+ * sequence backslash-r-backslash-n in JSON tool parameters rather than actual
+ * CR (0x0D) + LF (0x0A) bytes. The resulting text parses as a single line,
+ * which strict servers (e.g. Apache-Coyote) reject with 400 Bad Request and
+ * which Burp/Montoya may "repair" by injecting headers after the body
+ * separator.
+ *
+ * Normalization is applied only to the request prelude (request line and
+ * headers, up to and including the first blank line). The body is preserved
+ * verbatim so that legitimate escape sequences in bodies — e.g. `\n` inside a
+ * JSON string literal — and binary payloads remain byte-exact. If no blank
+ * line is present, the entire content is treated as prelude.
+ */
+internal fun normalizeHttpContent(content: String): String {
+    val preludeEnd = findPreludeEnd(content) ?: return normalizePrelude(content)
+    return normalizePrelude(content.substring(0, preludeEnd)) + content.substring(preludeEnd)
+}
+
+private val BLANK_LINE_MARKERS = listOf(
+    "\r\n\r\n",         // actual CRLF blank line
+    "\n\n",              // actual LF blank line
+    "\\r\\n\\r\\n",     // literal CRLF blank line
+    "\\n\\n",            // literal LF blank line
+)
+
+private fun findPreludeEnd(content: String): Int? {
+    var bestStart = -1
+    var bestLen = 0
+    for (marker in BLANK_LINE_MARKERS) {
+        val idx = content.indexOf(marker)
+        if (idx >= 0 && (bestStart < 0 || idx < bestStart)) {
+            bestStart = idx
+            bestLen = marker.length
+        }
+    }
+    return if (bestStart < 0) null else bestStart + bestLen
+}
+
+private fun normalizePrelude(prelude: String): String = prelude
+    .replace("\\r\\n", "\n")   // Literal \r\n escape sequences → LF
+    .replace("\\n", "\n")      // Remaining literal \n → LF
+    .replace("\\r", "")        // Remaining literal \r → remove
+    .replace("\r", "")          // Actual CR → remove
+    .replace("\n", "\r\n")      // All LF → proper CRLF
+
 fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
@@ -78,7 +120,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         api.logging().logToOutput("MCP HTTP/1.1 request: $targetHostname:$targetPort")
 
-        val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
+        val fixedContent = normalizeHttpContent(content)
 
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
         val response = api.http().sendRequest(request)
@@ -123,20 +165,21 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         response?.toString() ?: "<no response>"
     }
 
-    mcpTool<CreateRepeaterTab>("Creates an HTTP/1.1 Repeater tab with the specified raw HTTP request and optional tab name. Prefer create_repeater_tab_http2 for modern web targets that speak HTTP/2.") {
-        val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
+    mcpUnitTool<CreateRepeaterTab>("Creates an HTTP/1.1 Repeater tab with the specified raw HTTP request and optional tab name. Make sure to use carriage returns appropriately. Prefer create_repeater_tab_http2 for modern web targets that speak HTTP/2.") {
+        val fixedContent = normalizeHttpContent(content)
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
         api.repeater().sendToRepeater(request, tabName)
     }
 
-    mcpTool<CreateRepeaterTabHttp2>("Creates an HTTP/2 Repeater tab with the specified HTTP/2 request and optional tab name. Use this by default for modern web targets. Do NOT pass headers to the body parameter.") {
+    mcpUnitTool<CreateRepeaterTabHttp2>("Creates an HTTP/2 Repeater tab with the specified HTTP/2 request and optional tab name. Use this by default for modern web targets. Do NOT pass headers to the body parameter.") {
         val headerList = buildHttp2HeaderList(pseudoHeaders, headers)
         val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
         api.repeater().sendToRepeater(request, tabName)
     }
 
-    mcpTool<SendToIntruder>("Sends an HTTP request to Intruder with the specified HTTP request and optional tab name. Make sure to use carriage returns appropriately.") {
-        val request = HttpRequest.httpRequest(toMontoyaService(), content)
+    mcpUnitTool<SendToIntruder>("Sends an HTTP request to Intruder with the specified HTTP request and optional tab name. Make sure to use carriage returns appropriately.") {
+        val fixedContent = normalizeHttpContent(content)
+        val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
         api.intruder().sendToIntruder(request, tabName)
     }
 
@@ -164,14 +207,24 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "output_project_options",
         "Outputs current project-level configuration in JSON format. You can use this to determine the schema for available config options."
     ) {
-        api.burpSuite().exportProjectOptionsAsJson()
+        val json = api.burpSuite().exportProjectOptionsAsJson()
+        if (config.filterConfigCredentials) {
+            filterConfigCredentials(json)
+        } else {
+            json
+        }
     }
 
     mcpTool(
         "output_user_options",
         "Outputs current user-level configuration in JSON format. You can use this to determine the schema for available config options."
     ) {
-        api.burpSuite().exportUserOptionsAsJson()
+        val json = api.burpSuite().exportUserOptionsAsJson()
+        if (config.filterConfigCredentials) {
+            filterConfigCredentials(json)
+        } else {
+            json
+        }
     }
 
     val toolingDisabledMessage =
@@ -221,18 +274,18 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpPaginatedTool<GetProxyHttpHistory>("Displays items within the proxy HTTP history") {
         val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
+            checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
         }
         if (!allowed) {
             return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
         }
 
-        api.proxy().history().asSequence().map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+        api.proxy().history().asSequence().map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
     mcpPaginatedTool<GetProxyHttpHistoryRegex>("Displays items matching a specified regex within the proxy HTTP history") {
         val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
+            checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
         }
         if (!allowed) {
             return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
@@ -240,24 +293,48 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         val compiledRegex = Pattern.compile(regex)
         api.proxy().history { it.contains(compiledRegex) }.asSequence()
-            .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+            .map { encodeHistoryItem(it.toSerializableForm()) }
+    }
+
+    mcpPaginatedTool<GetOrganizerItems>("Displays items within the Organizer tab") {
+        val allowed = runBlocking {
+            checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        }
+        if (!allowed) {
+            return@mcpPaginatedTool sequenceOf("Organizer access denied by Burp Suite")
+        }
+
+        api.organizer().items().asSequence().map { encodeHistoryItem(it.toSerializableForm()) }
+    }
+
+    mcpPaginatedTool<GetOrganizerItemsRegex>("Displays items matching a specified regex within the Organizer tab") {
+        val allowed = runBlocking {
+            checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        }
+        if (!allowed) {
+            return@mcpPaginatedTool sequenceOf("Organizer access denied by Burp Suite")
+        }
+
+        val compiledRegex = Pattern.compile(regex)
+        api.organizer().items { it.contains(compiledRegex) }.asSequence()
+            .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
         val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
+            checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         }
         if (!allowed) {
             return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
         }
 
         api.proxy().webSocketHistory().asSequence()
-            .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+            .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
     mcpPaginatedTool<GetProxyWebsocketHistoryRegex>("Displays items matching a specified regex within the proxy WebSocket history") {
         val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
+            checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         }
         if (!allowed) {
             return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
@@ -265,7 +342,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         val compiledRegex = Pattern.compile(regex)
         api.proxy().webSocketHistory { it.contains(compiledRegex) }.asSequence()
-            .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+            .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
     mcpTool<SetTaskExecutionEngineState>("Sets the state of Burp's task execution engine (paused or unpaused)") {
@@ -409,6 +486,12 @@ data class GetProxyHttpHistory(override val count: Int, override val offset: Int
 
 @Serializable
 data class GetProxyHttpHistoryRegex(val regex: String, override val count: Int, override val offset: Int) : Paginated
+
+@Serializable
+data class GetOrganizerItems(override val count: Int, override val offset: Int) : Paginated
+
+@Serializable
+data class GetOrganizerItemsRegex(val regex: String, override val count: Int, override val offset: Int) : Paginated
 
 @Serializable
 data class GetProxyWebsocketHistory(override val count: Int, override val offset: Int) : Paginated
