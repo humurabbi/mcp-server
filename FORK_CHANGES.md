@@ -4,6 +4,15 @@ Local changes layered on top of [PortSwigger/mcp-server](https://github.com/Port
 
 Read newest first. Each entry references the commit SHA on `main` of this fork.
 
+## Merge upstream MCP SDK 0.16.0 — `736d6e5`
+
+Merged `origin/main` at `318c909` into fork `main`. Upstream changes gained:
+
+- Pending approval dialogs (HTTP request and data access) are cancelled when the MCP call that opened them ends, instead of lingering. Security checks are now `suspend` functions called directly rather than via `runBlocking`, and `send_http1_request` / `send_http2_request` call `ensureActive()` just before sending (PR #146).
+- MCP Kotlin SDK and bundled `mcp-proxy-all.jar` upgraded 0.15.0 → 0.16.0 (PR #147).
+
+The merge was conflict-free. The `hasResponse()`-gated Site Map writes and the Collaborator default-generator switch are unchanged and remain the only fork-only code deltas.
+
 ## Merge upstream v1.3.0 — `e16cac8`
 
 Merged `origin/main` at `642e6fa` (upstream tag `v1.3.0` and everything after it) into fork `main`. Upstream features gained:
@@ -67,6 +76,7 @@ Three related improvements bundled together:
 
 - `main` — primary working branch, all local changes integrated
 - `merge/upstream-v1.3.0` — branch the v1.3.0 merge was performed on before landing on `main`
+- `merge/upstream-0.16.0` — branch the 0.16.0 SDK merge was performed on before landing on `main`
 - `fix/sitemap-visibility-and-newline-fix` — PR #90 branch (single commit; force-pushed once to the fork)
 - `feat/http2-repeater-tab` — PR #91 branch (merged upstream)
 - `wip/collaborator-default-generator` — preserved snapshot of the Collaborator commit's lineage before main was fast-forwarded
