@@ -4,6 +4,21 @@ Local changes layered on top of [PortSwigger/mcp-server](https://github.com/Port
 
 Read newest first. Each entry references the commit SHA on `main` of this fork.
 
+## Highlight and screenshot proxy history items for evidence
+
+Two new tools in `ProxyEvidenceTools.kt`, kept in their own file so upstream merges stay clean:
+
+- `highlight_proxy_history_items` sets the highlight color (default magenta, `NONE` clears) and optionally the notes on Proxy history items by their `#` id. Used to mark the exact request that backs a finding, e.g. notes `F-2026-22455 ...`, so it is easy to find in Burp's UI.
+- `screenshot_proxy_history_item` renders an item's request and response with Burp's own read-only message editors and saves a PNG under `~/BurpMCP/screenshots/`. The output matches Burp's message panes (theme, font, Pretty view, syntax colors). `searchTerm` highlights matches and scrolls each pane to its first match, which brings evidence deep inside a long response into view; `fullHeight` grows the image to the whole message (capped at 8000 px); `layout` is `SIDE_BY_SIDE` or `STACKED`; `useOriginal` picks the pre-edit version of intercepted items; `returnImage` also returns the PNG inline.
+
+Supporting changes: proxy history items now serialize their `id` (appended as the last field, so upstream's positional constructor calls are untouched), and `checkDataAccessOrDeny` is `internal` so both tools share the HTTP history permission check.
+
+Implementation notes, from a prototype run against a live project:
+
+- Burp's editors only paint text inside a window that has been shown. Painting a never-shown frame (`addNotify` only) or a bare component gives empty panes, so the renderer uses an undecorated, non-focusable utility window positioned far off-screen, waits for layout and syntax highlighting, then paints at 2x.
+- Scrolling finds the editor's `JTextComponent` and locates the match in its displayed text, so it is exact for the reformatted Pretty view. If no text component is found it falls back to a line-ratio estimate on the raw message and says so in the tool output.
+- File names are reduced to a sanitized base name inside the fixed directory, so an MCP client cannot write PNGs elsewhere on disk.
+
 ## Merge upstream MCP SDK 0.16.0 — `736d6e5`
 
 Merged `origin/main` at `318c909` into fork `main`. Upstream changes gained:

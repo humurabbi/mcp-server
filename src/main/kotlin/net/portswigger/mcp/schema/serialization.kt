@@ -47,6 +47,7 @@ fun burp.api.montoya.http.message.HttpRequestResponse.toSerializableForm(): Http
 
 fun ProxyHttpRequestResponse.toSerializableForm(): HttpRequestResponse {
     return HttpRequestResponse(
+        id = id(),
         request = request()?.toString() ?: "<no request>",
         response = response()?.toString() ?: "<no response>",
         notes = annotations().notes()
@@ -116,7 +117,8 @@ enum class AuditIssueConfidence {
 data class HttpRequestResponse(
     val request: String?,
     val response: String?,
-    val notes: String?
+    val notes: String?,
+    val id: Int? = null
 )
 
 @Serializable

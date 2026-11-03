@@ -5,6 +5,7 @@ import burp.api.montoya.burpsuite.TaskExecutionEngine
 import burp.api.montoya.collaborator.*
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
+import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
@@ -13,6 +14,7 @@ import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
+import burp.api.montoya.proxy.ProxyHistoryFilter
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import burp.api.montoya.utilities.Base64Utils
 import burp.api.montoya.utilities.RandomUtils
@@ -905,6 +907,124 @@ class ToolsKtTest {
         }
     }
     
+    @Nested
+    inner class ProxyEvidenceToolsTests {
+        private val proxy = mockk<Proxy>()
+
+        private fun historyItem(id: Int): Pair<ProxyHttpRequestResponse, burp.api.montoya.core.Annotations> {
+            var color = HighlightColor.NONE
+            var notes = ""
+            val annotations = mockk<burp.api.montoya.core.Annotations>().apply {
+                every { setHighlightColor(any()) } answers { color = firstArg() }
+                every { highlightColor() } answers { color }
+                every { setNotes(any()) } answers { notes = firstArg() }
+                every { notes() } answers { notes }
+            }
+            val item = mockk<ProxyHttpRequestResponse>().apply {
+                every { id() } returns id
+                every { annotations() } returns annotations
+            }
+            return item to annotations
+        }
+
+        private fun stubHistory(items: List<ProxyHttpRequestResponse>) {
+            every { api.proxy() } returns proxy
+            every { proxy.history(any<ProxyHistoryFilter>()) } answers {
+                val filter = firstArg<ProxyHistoryFilter>()
+                items.filter { filter.matches(it) }
+            }
+        }
+
+        @Test
+        fun `highlight sets color and notes on matching items and reports missing ids`() {
+            val (first, firstAnnotations) = historyItem(10)
+            val (second, secondAnnotations) = historyItem(11)
+            stubHistory(listOf(first, second))
+
+            runBlocking {
+                val text = client.callTool(
+                    "highlight_proxy_history_items",
+                    mapOf("ids" to listOf(10, 99), "notes" to "F-03 IDOR")
+                ).expectTextContent()
+
+                assertTrue(text.contains("#10: highlighted MAGENTA"), text)
+                assertTrue(text.contains("#99: not found"), text)
+            }
+
+            verify { firstAnnotations.setHighlightColor(HighlightColor.MAGENTA) }
+            verify { firstAnnotations.setNotes("F-03 IDOR") }
+            verify(exactly = 0) { secondAnnotations.setHighlightColor(any()) }
+        }
+
+        @Test
+        fun `highlight leaves notes alone when omitted and accepts NONE to clear`() {
+            val (item, annotations) = historyItem(5)
+            stubHistory(listOf(item))
+
+            runBlocking {
+                client.callTool("highlight_proxy_history_items", mapOf("ids" to listOf(5), "color" to "none"))
+                    .expectTextContent()
+            }
+
+            verify { annotations.setHighlightColor(HighlightColor.NONE) }
+            verify(exactly = 0) { annotations.setNotes(any()) }
+        }
+
+        @Test
+        fun `highlight rejects unknown colors`() {
+            val (item, _) = historyItem(5)
+            stubHistory(listOf(item))
+
+            runBlocking {
+                val result = client.callTool(
+                    "highlight_proxy_history_items", mapOf("ids" to listOf(5), "color" to "purple")
+                )
+                assertTrue(result!!.isError == true)
+                assertTrue((result.content.first() as TextContent).text.contains("Unknown color"))
+            }
+        }
+
+        @Test
+        fun `screenshot reports ids missing from proxy history`() {
+            stubHistory(emptyList())
+
+            runBlocking {
+                client.callTool("screenshot_proxy_history_item", mapOf("id" to 42))
+                    .expectTextContent("#42: not found in proxy history")
+            }
+        }
+
+        @Test
+        fun `proxy history items expose their id`() {
+            val item = mockk<ProxyHttpRequestResponse>(relaxed = true).apply {
+                every { id() } returns 1423
+                every { request().toString() } returns "GET / HTTP/1.1"
+                every { response().toString() } returns "HTTP/1.1 200 OK"
+                every { annotations().notes() } returns ""
+            }
+
+            assertEquals(1423, item.toSerializableForm().id)
+        }
+
+        @Test
+        fun `snapshot file names cannot escape the screenshot directory`() {
+            val item = mockk<ProxyHttpRequestResponse>().apply { every { id() } returns 7 }
+
+            assertEquals("passwd.png", snapshotFileName("../../etc/passwd", item))
+            assertEquals("F-03_idor.png", snapshotFileName("F-03 idor.png", item))
+            assertTrue(snapshotFileName(null, item).matches(Regex("proxy-7-\\d{8}-\\d{6}\\.png")))
+            assertTrue(snapshotFileName("..", item).startsWith("proxy-7-"))
+        }
+
+        @Test
+        fun `layout parsing accepts both layouts and rejects others`() {
+            assertFalse(parseLayout(null))
+            assertFalse(parseLayout("side_by_side"))
+            assertTrue(parseLayout("STACKED"))
+            assertThrows(IllegalArgumentException::class.java) { parseLayout("grid") }
+        }
+    }
+
     @Nested
     inner class CollaboratorToolsTests {
         private val collaborator = mockk<Collaborator>()
